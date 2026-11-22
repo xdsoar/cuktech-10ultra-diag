@@ -1,0 +1,70 @@
+name: Build & Verify APK
+
+on:
+  push:
+    branches: [ main ]
+    tags: [ 'v*' ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: Ensure Android SDK platform 34 & build-tools
+        run: |
+          SDK="${ANDROID_SDK_ROOT:-$ANDROID_HOME}"
+          if [[ ! -f "$SDK/platforms/android-34/android.jar" ]] || [[ -z "$(find "$SDK/build-tools" -mindepth 1 -maxdepth 1 -type d 2>/dev/null)" ]]; then
+            yes | "$SDK/cmdline-tools/latest/bin/sdkmanager" --sdk_root="$SDK" "platforms;android-34" "build-tools;34.0.0"
+          fi
+
+      - name: Run protocol unit tests & build APK
+        run: |
+          chmod +x ./build_apk.sh
+          ./build_apk.sh
+
+      - name: Audit bytecode & zero-network permission
+        run: |
+          python3 - <<'PY'
+          import subprocess, zipfile
+          apk = "dist/cuktech-10ultra-diag-1.0.0.apk"
+          with zipfile.ZipFile(apk) as z:
+              dex = z.read("classes.dex")
+              assert b"android.permission.INTERNET" not in z.read("AndroidManifest.xml")
+              assert b"java/net/" not in dex and b"HttpURLConnection" not in dex
+          print("Audit passed: zero INTERNET permission, zero network classes in DEX.")
+          PY
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: cuktech-10ultra-diag-apk
+          path: dist/cuktech-10ultra-diag-1.0.0.apk
+
+      - name: Publish GitHub Release on version tag
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/cuktech-10ultra-diag-1.0.0.apk
+          generate_release_notes: false
+          body: |
+            ### 酷态科 10 号 Ultra (AD1204U) 固件冻死离线诊断工具 `${{ github.ref_name }}`
+
+            本安装包由 **GitHub Actions 官方云端环境直接根据本仓库开源代码自动编译构建**（无人工本地介入打包），可在上方 Actions 构建记录中核对编译日志与权限审计输出。
+
+            - **支持系统**：Android 6.0 – Android 16 (`minSdk 23`, `targetSdk 34`)
+            - **网络权限**：**无**（未声明 `android.permission.INTERNET`，纯本地蓝牙只读查询与本地图片渲染）
+            - **使用准备**：将充电头插电通电，**先从手机后台彻底划掉「米家」App**（BLE 同一时刻仅允许单个连接），再打开本应用点击「开始一键检测」。
